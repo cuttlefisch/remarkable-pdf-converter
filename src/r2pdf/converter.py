@@ -9,7 +9,7 @@ import logging
 import re
 import tempfile
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import unquote as _url_unquote
 from xml.etree import ElementTree as ET
@@ -25,14 +25,14 @@ CSS_TEMPLATE = """
 @page {{
     size: 107.22mm 190.61mm;
     margin: {margin_top}mm {margin_right}mm {margin_bottom}mm {margin_left}mm;
-    background-color: #1c1208;
+    background-color: #000000;
 }}
 html {{
-    background-color: #1c1208 !important;
+    background-color: #000000 !important;
 }}
 body {{
-    background-color: #1c1208 !important;
-    color: #e8d5b7 !important;
+    background-color: #000000 !important;
+    color: #ffffff !important;
     line-height: {line_height} !important;
     font-size: {font_size}pt !important;
     font-family: 'Linux Libertine', Georgia, Palatino, 'Palatino Linotype', serif !important;
@@ -41,19 +41,20 @@ body {{
 }}
 * {{
     background-color: transparent !important;
-    color: #e8d5b7 !important;
-    border-color: #3a2e1a !important;
+    color: #ffffff !important;
+    border-color: #555555 !important;
 }}
 h1, h2, h3, h4, h5, h6 {{
-    color: #f5e8cc !important;
+    color: #ffffff !important;
     line-height: 1.4 !important;
 }}
 code, pre {{
-    background-color: #2a1e0a !important;
-    color: #c8b89a !important;
+    background-color: #000000 !important;
+    color: #ffffff !important;
 }}
 a {{
-    color: #c8960a !important;
+    color: #ffffff !important;
+    text-decoration: none !important;
 }}
 img {{
     max-width: 100%;
@@ -70,14 +71,14 @@ table {{
     border-collapse: collapse;
 }}
 td, th {{
-    border: 1px solid #3a2e1a !important;
+    border: 1px solid #555555 !important;
     padding: 0.3em 0.5em;
 }}
 blockquote {{
-    border-left: 3px solid #c8960a !important;
+    border-left: 3px solid #ffffff !important;
     margin-left: 1em;
     padding-left: 0.8em;
-    color: #c8b89a !important;
+    color: #ffffff !important;
 }}
 """
 
@@ -458,6 +459,27 @@ def _output_name_for(input_path: Path, source_dir: Path) -> str:
 # Bulk conversion
 # ---------------------------------------------------------------------------
 
+def _convert_one_book(f: Path, source_dir: Path, output_dir: Path, options: dict) -> dict:
+    out_stem = _output_name_for(f, source_dir)
+    out_pdf = output_dir / f"{out_stem}.pdf"
+
+    if options.get("skip_existing") and out_pdf.exists():
+        return {"file": str(f), "status": "skipped", "output": str(out_pdf)}
+
+    file_opts = dict(options)
+    try:
+        result_path = convert_single(f, output_dir, file_opts)
+        if result_path.name != out_pdf.name and result_path.exists():
+            result_path.rename(out_pdf)
+        return {"file": str(f), "status": "ok", "output": str(out_pdf)}
+    except (FileValidationError, ConversionError, OutputValidationError) as e:
+        log.error("FAILED %s: %s", f.name, e)
+        return {"file": str(f), "status": "failed", "error": str(e)}
+    except Exception as e:
+        log.error("UNEXPECTED ERROR %s: %s", f.name, e)
+        return {"file": str(f), "status": "failed", "error": str(e)}
+
+
 def convert_bulk(
     source_dir: Path,
     output_dir: Path,
@@ -478,30 +500,15 @@ def convert_bulk(
     progress_log = output_dir / "conversion_log.jsonl"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _convert_one(f: Path) -> dict:
-        out_stem = _output_name_for(f, source_dir)
-        out_pdf = output_dir / f"{out_stem}.pdf"
-
-        if options.get("skip_existing") and out_pdf.exists():
-            return {"file": str(f), "status": "skipped", "output": str(out_pdf)}
-
-        file_opts = dict(options)
-        try:
-            result_path = convert_single(f, output_dir, file_opts)
-            if result_path.name != out_pdf.name and result_path.exists():
-                result_path.rename(out_pdf)
-            return {"file": str(f), "status": "ok", "output": str(out_pdf)}
-        except (FileValidationError, ConversionError, OutputValidationError) as e:
-            log.error("FAILED %s: %s", f.name, e)
-            return {"file": str(f), "status": "failed", "error": str(e)}
-        except Exception as e:
-            log.error("UNEXPECTED ERROR %s: %s", f.name, e)
-            return {"file": str(f), "status": "failed", "error": str(e)}
-
     workers = options.get("workers", 4)
     with open(progress_log, "a") as log_fh:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(_convert_one, f): f for f in files}
+        with ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=1) as executor:
+            futures = {
+                executor.submit(
+                    _convert_one_book, f, source_dir, output_dir, options
+                ): f
+                for f in files
+            }
             for future in as_completed(futures):
                 result = future.result()
                 log_fh.write(json.dumps(result) + "\n")

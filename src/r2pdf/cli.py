@@ -50,9 +50,9 @@ def setup_argparse() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
+        default=8,
         metavar="N",
-        help="Parallel workers for bulk conversion (default: 4).",
+        help="Parallel workers for bulk conversion (default: 8).",
     )
     parser.add_argument(
         "--font-size",
